@@ -10,6 +10,8 @@ import resource
 import os
 import sys
 
+from multiprocessing import Pool, cpu_count
+
 #-------------------------------------------------------------------------------
 # Read the namelist.ini file.
 
@@ -26,6 +28,7 @@ def read_namelist_file(fil_namelist):
   domain     = namelist["NAMELIST"]["domain"    ]
   e_we       = namelist["NAMELIST"]["e_we"      ]
   e_sn       = namelist["NAMELIST"]["e_sn"      ]
+  nproc      = namelist["NAMELIST"]["nproc"     ]
   verbose    = namelist["NAMELIST"]["verbose"   ]
 
   loc_in     = loc_in.strip()
@@ -37,10 +40,11 @@ def read_namelist_file(fil_namelist):
   domain     = [i.strip() for i in domain.split(",")]
   e_we       = [int(i) for i in e_we.split(",")]
   e_sn       = [int(i) for i in e_sn.split(",")]
+  nproc      = int(nproc)
   verbose    = bool(verbose)
 
   return loc_in, loc_out, start_date, end_date, interval, dataset, domain, \
-    e_we, e_sn, verbose
+    e_we, e_sn, nproc, verbose
 
 namelist = configparser.ConfigParser()
 if len(sys.argv) > 1:
@@ -49,7 +53,7 @@ else:
   fil_namelist = "namelist.ini"
 
 loc_in, loc_out, start_date, end_date, interval, dataset, domain, \
-  e_we, e_sn, verbose = read_namelist_file(fil_namelist)
+  e_we, e_sn, nproc, verbose = read_namelist_file(fil_namelist)
 
 assert (len(domain) == len(e_we)) & (len(domain) == len(e_sn))
 dict_e_we = { domain[i] : e_we[i] for i in range(len(domain)) } 
@@ -57,7 +61,7 @@ dict_e_sn = { domain[i] : e_sn[i] for i in range(len(domain)) }
 
 #-------------------------------------------------------------------------------
 
-def process(dataset_i, domain_i, e_we_i, e_sn_i, time_i):
+def process(dataset_i, domain_i, time_i):
   filname = f"{dataset_i}_{domain_i}_{time_i.strftime('%Y-%m-%d_%H:%M:%S')}"
   fil_out = f"{loc_out}/{filname}"
   fils = sorted(glob.glob(f"{loc_in}/{filname}_*"))
@@ -69,6 +73,8 @@ def process(dataset_i, domain_i, e_we_i, e_sn_i, time_i):
 
   # Create a NetCDF file which will contain the joined results, by using the
   # first MPI process' NetCDF file structure as a reference.
+  e_we_i           = dict_e_we[domain_i]
+  e_sn_i           = dict_e_sn[domain_i]
   west_east        = e_we_i-1
   west_east_stag   = e_we_i
   south_north      = e_sn_i-1
@@ -144,7 +150,6 @@ def process(dataset_i, domain_i, e_we_i, e_sn_i, time_i):
 
       ncout.variables[name][tuple(sliced)] = var[:]
 
-    mem_usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024**2)
     ncin.close()
   ncout.close()
 
@@ -162,5 +167,12 @@ while (time_now <= end_date):
   times.append(time_now)
   time_now += datetime.timedelta(minutes=interval)
 
-for dataset_i, domain_i, time_i in itertools.product(dataset, domain, times):
-  process(dataset_i, domain_i, dict_e_we[domain_i], dict_e_sn[domain_i], time_i)
+args = list(itertools.product(dataset, domain, times))
+
+if nproc == 1:
+  for dataset_i, domain_i, time_i in args:
+    process(dataset_i, domain_i, time_i)
+else:
+  nproc_ = min([nproc, cpu_count()])
+  with Pool(processes=nproc_) as pool:
+    _ = pool.starmap(process, args)
